@@ -1,9 +1,24 @@
 #include <Wire.h>
 #include <SensirionI2cSht3x.h>
 #include <U8g2lib.h>
+#include "NetworkService.h"
 
 constexpr int OLED_SDA = 5;
 constexpr int OLED_SCL = 6;
+constexpr int SETUP_BUTTON_PIN = 9; // Hold for 3s while running (not during power-on).
+uint32_t buttonSince = 0;
+bool buttonHeld = false;
+bool buttonHandled = false;
+
+void handleSetupButton() {
+  if (digitalRead(SETUP_BUTTON_PIN) == LOW) {
+    if (!buttonHeld) { buttonHeld = true; buttonSince = millis(); }
+    if (!buttonHandled && uint32_t(millis() - buttonSince) >= 3000) {
+      buttonHandled = true;
+      networkRequestPortal();
+    }
+  } else { buttonHeld = false; buttonHandled = false; }
+}
 
 // 0.42-inch OLED: 72x40 pixels; the driver handles the controller offset.
 // Change U8G2_R0 to U8G2_R2 only if the physical display is upside down.
@@ -63,6 +78,8 @@ const char *readSensor(float &temperature, float &humidity) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
+  networkBegin();
 
   // 明确指定板载 OLED 引脚
   // 传感器：SDA -> GPIO5, SCL -> GPIO6, VCC -> 3.3V, GND -> GND。
@@ -96,6 +113,7 @@ void setup() {
 }
 
 void loop() {
+  handleSetupButton();
   const uint32_t now = millis();
   if (now - lastSampleMs < SAMPLE_INTERVAL_MS) {
     delay(5);
@@ -112,10 +130,24 @@ void loop() {
     Serial.printf("SHT3x 0x%02X | Temperature: %.2f C | Humidity: %.2f %%RH\n",
                   sensorAddress, temperature, humidity);
   }
+  networkPublishSample(temperature, humidity, error == nullptr);
   // OLED 异常时仍继续读取传感器并输出串口。
   if (!oledReady) return;
 
   oled.clearBuffer();
+  const NetworkView net = networkView();
+  if (net.portalActive && millis() % 8000 < 6000) {
+    // Alternate setup instructions with readings; sampling always continues.
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "WiFi setup");
+    oled.drawStr(0, 18, net.apName);
+    char password[16];
+    snprintf(password, sizeof password, "P:%s", net.apPassword);
+    oled.drawStr(0, 28, password);
+    oled.drawStr(0, 39, "192.168.4.1");
+    oled.sendBuffer();
+    return;
+  }
   if (error) {
     // Short messages fit the 72-pixel width; full diagnostics go to Serial.
     const char *message = "SHT missing";
@@ -138,6 +170,15 @@ void loop() {
     // Advance only after a successful measurement, even if values are unchanged.
     snprintf(line, sizeof(line), "LIVE %06lu",
              static_cast<unsigned long>(successfulSamples % 1000000UL));
+    if ((millis() / 3000) % 2) {
+      if (net.portalActive) snprintf(line, sizeof line, "SETUP AP");
+      else if (!net.connected) snprintf(line, sizeof line, "WiFi offline");
+      else if (!net.configured) snprintf(line, sizeof line, "API not set");
+      else if (strcmp(net.state, "SENDING") == 0) snprintf(line, sizeof line, "Sending...");
+      else if (strcmp(net.state, "WAIT_CLOCK") == 0) snprintf(line, sizeof line, "Sync clock");
+      else if (strcmp(net.state, "RETRY") == 0) snprintf(line, sizeof line, "Retry %d", net.httpStatus);
+      else snprintf(line, sizeof line, "UP %lu WiFi+", static_cast<unsigned long>(net.uploaded % 10000));
+    }
     oled.drawStr(0, 39, line);
     if (successfulSamples & 1U) oled.drawBox(67, 34, 3, 3);
   }
