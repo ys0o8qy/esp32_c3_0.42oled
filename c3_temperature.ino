@@ -13,6 +13,7 @@ bool oledReady = false;
 SensirionI2cSht3x sensor;
 uint8_t sensorAddress = 0;
 uint32_t lastSampleMs = 0;
+uint32_t successfulSamples = 0;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 1000;
 
 // Detailed driver errors (including CRC failures) are sent to Serial.
@@ -107,6 +108,7 @@ void loop() {
     Serial.printf("ERROR: %s; retry in 1s\n", error);
     sensorAddress = 0; // 下次重新查找/复位；传感器重新接入后自动恢复。
   } else {
+    ++successfulSamples;
     Serial.printf("SHT3x 0x%02X | Temperature: %.2f C | Humidity: %.2f %%RH\n",
                   sensorAddress, temperature, humidity);
   }
@@ -133,7 +135,11 @@ void loop() {
     oled.drawStr(0, 26, line);
     oled.drawHLine(0, 30, 72);
     oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(0, 39, "LIVE 1s");
+    // Advance only after a successful measurement, even if values are unchanged.
+    snprintf(line, sizeof(line), "LIVE %06lu",
+             static_cast<unsigned long>(successfulSamples % 1000000UL));
+    oled.drawStr(0, 39, line);
+    if (successfulSamples & 1U) oled.drawBox(67, 34, 3, 3);
   }
   oled.sendBuffer();
 }
