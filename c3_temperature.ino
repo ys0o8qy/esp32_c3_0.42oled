@@ -1,19 +1,13 @@
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h>
 
 constexpr int OLED_SDA = 5;
 constexpr int OLED_SCL = 6;
 
-Adafruit_SSD1306 oled(128, 64, &Wire, -1);
-bool oledReady = false;
-
-bool respondsAt(uint8_t address) {
-  Wire.beginTransmission(address);
-  return Wire.endTransmission() == 0;
-}
-
-Adafruit_SSD1306 oled(128, 64, &Wire, -1);
+// 0.42-inch OLED: 72x40 pixels; the driver handles the controller offset.
+// Change U8G2_R0 to U8G2_R2 only if the physical display is upside down.
+U8G2_SSD1306_72X40_ER_F_HW_I2C oled(
+    U8G2_R0, U8X8_PIN_NONE, OLED_SCL, OLED_SDA);
 bool oledReady = false;
 uint8_t sensorAddress = 0;
 uint32_t lastSampleMs = 0;
@@ -85,7 +79,7 @@ void setup() {
   // 传感器：SDA -> GPIO5, SCL -> GPIO6, VCC -> 3.3V, GND -> GND。
   Wire.begin(OLED_SDA, OLED_SCL, 100000);
   Wire.setTimeOut(50);
-  Serial.println("ESP32C3-Pro SHT3x monitor; SDA=5 SCL=6");
+  Serial.println("ESP32-C3 72x40 SHT3x monitor; SDA=5 SCL=6");
   for (uint8_t i = 1; i < 127; ++i) {
     if (respondsAt(i)) Serial.printf("I2C found: 0x%02X\n", i);
   }
@@ -103,15 +97,12 @@ void setup() {
 
   Serial.printf("I2C device found: 0x%02X\n", address);
 
-  // 最后的 false：Wire 已初始化，不让库再次初始化总线
-  if (!oled.begin(SSD1306_SWITCHCAPVCC, address, false, false)) {
-    Serial.println("OLED buffer allocation failed.");
-    return;
-  }
-  oled.ssd1306_command(SSD1306_COMSCANINC);
-
-  oled.setTextColor(SSD1306_WHITE);
-  oled.setTextWrap(false);
+  // U8g2 takes an 8-bit I2C address; both devices share Wire on GPIO5/6.
+  oled.setI2CAddress(address << 1);
+  oled.setBusClock(100000);
+  oled.begin();
+  oled.setContrast(128);
+  Wire.setTimeOut(50);
   oledReady = true;
 }
 
@@ -134,38 +125,28 @@ void loop() {
   // OLED 异常时仍继续读取传感器并输出串口。
   if (!oledReady) return;
 
-  oled.clearDisplay();
-
-  oled.setTextSize(1);
-  oled.setCursor(0, 0);
-  oled.println("SHT3x TEMP / HUM");
-  oled.drawFastHLine(0, 11, 128, SSD1306_WHITE);
-
+  oled.clearBuffer();
   if (error) {
-    oled.setCursor(0, 20);
-    oled.println(error);
-    oled.setCursor(0, 36);
-    oled.println("Check SDA5 / SCL6");
-    oled.setCursor(0, 54);
-    oled.println("Retrying...");
-    oled.display();
-    return;
+    // Short messages fit the 72-pixel width; full diagnostics go to Serial.
+    const char *message = "SHT missing";
+    if (strcmp(error, "Command failed") == 0) message = "I2C command";
+    else if (strcmp(error, "Read failed") == 0) message = "I2C read";
+    else if (strcmp(error, "CRC error") == 0) message = "CRC error";
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 10, message);
+    oled.drawStr(0, 24, "SDA5 SCL6");
+    oled.drawStr(0, 38, "Retry...");
+  } else {
+    char line[20];
+    // 7x14 fixed-width font: even T:-45.0C and H:100.0% fit.
+    oled.setFont(u8g2_font_7x14_tf);
+    snprintf(line, sizeof(line), "T:%5.1fC", temperature);
+    oled.drawStr(0, 12, line);
+    snprintf(line, sizeof(line), "H:%5.1f%%", humidity);
+    oled.drawStr(0, 26, line);
+    oled.drawHLine(0, 30, 72);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 39, "LIVE 1s");
   }
-
-  oled.setTextSize(2);
-  oled.setCursor(0, 17);
-  oled.print(temperature, 1);
-  oled.print(" C");
-  oled.setCursor(0, 37);
-  oled.print(humidity, 1);
-  oled.print(" %");
-
-  oled.setTextSize(1);
-  oled.setCursor(0, 56);
-  oled.print("LIVE 1s / ");
-  oled.print(millis() / 1000);
-  oled.print(" s");
-
-  // 绘制先写入内存，调用 display() 才更新屏幕
-  oled.display();
+  oled.sendBuffer();
 }
