@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <SensirionI2cSht3x.h>
 #include <U8g2lib.h>
 
 constexpr int OLED_SDA = 5;
@@ -9,30 +10,19 @@ constexpr int OLED_SCL = 6;
 U8G2_SSD1306_72X40_ER_F_HW_I2C oled(
     U8G2_R0, U8X8_PIN_NONE, OLED_SCL, OLED_SDA);
 bool oledReady = false;
+SensirionI2cSht3x sensor;
 uint8_t sensorAddress = 0;
 uint32_t lastSampleMs = 0;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 1000;
 
-// Sensirion SHT3x-DIS CRC-8: polynomial 0x31, initial value 0xFF.
-uint8_t crc8(const uint8_t *data, size_t length) {
-  uint8_t crc = 0xFF;
-  while (length--) {
-    crc ^= *data++;
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x80) ? (crc << 1) ^ 0x31 : crc << 1;
-    }
-  }
-  return crc;
-}
-
-bool sendSensorCommand(uint16_t command) {
-  Wire.beginTransmission(sensorAddress);
-  Wire.write(static_cast<uint8_t>(command >> 8));
-  Wire.write(static_cast<uint8_t>(command));
-  const uint8_t result = Wire.endTransmission();
-  if (result) Serial.printf("SHT3x address=0x%02X command=0x%04X I2C error=%u\n",
-                            sensorAddress, command, result);
-  return result == 0;
+// Detailed driver errors (including CRC failures) are sent to Serial.
+bool sensorCommandOk(int16_t result, const char *operation) {
+  if (result == NO_ERROR) return true;
+  char message[128];
+  errorToString(result, message, sizeof(message));
+  Serial.printf("SHT3x 0x%02X %s: %s (code=%d)\n",
+                sensorAddress, operation, message, result);
+  return false;
 }
 
 bool respondsAt(uint8_t address) {
@@ -40,34 +30,32 @@ bool respondsAt(uint8_t address) {
   return Wire.endTransmission() == 0;
 }
 
-bool connectSensor() {
+const char *connectSensor() {
   sensorAddress = respondsAt(0x44) ? 0x44 : (respondsAt(0x45) ? 0x45 : 0);
-  if (!sensorAddress) return false;
-  if (!sendSensorCommand(0x30A2)) return false; // Soft reset.
-  delay(10);
-  if (!sendSensorCommand(0x3066)) return false; // Heater off.
-  delay(2); // Allow the heater command to finish before starting a measurement.
-  return true;
+  if (!sensorAddress) return "SHT3x missing";
+  sensor.begin(Wire, sensorAddress);
+  if (!sensorCommandOk(sensor.stopMeasurement(), "stopMeasurement")) {
+    return "Init failed";
+  }
+  if (!sensorCommandOk(sensor.softReset(), "softReset")) return "Init failed";
+  if (!sensorCommandOk(sensor.disableHeater(), "disableHeater")) {
+    return "Init failed";
+  }
+  // The official library handles command delays, including heater settling.
+  return nullptr;
 }
 
 const char *readSensor(float &temperature, float &humidity) {
-  if (!sensorAddress && !connectSensor()) return "SHT3x missing";
-  // High repeatability, single shot, without clock stretching.
-  if (!sendSensorCommand(0x2400)) return "Command failed";
-  delay(20);
-  uint8_t data[6];
-  if (Wire.requestFrom(sensorAddress, static_cast<size_t>(6)) != 6) {
-    while (Wire.available()) Wire.read();
+  if (!sensorAddress) {
+    const char *error = connectSensor();
+    if (error) return error;
+  }
+  // High repeatability, no clock stretching. CRC and conversion are in the library.
+  if (!sensorCommandOk(sensor.measureSingleShot(REPEATABILITY_HIGH, false,
+                                                temperature, humidity),
+                       "measureSingleShot")) {
     return "Read failed";
   }
-  for (uint8_t &value : data) value = Wire.read();
-  if (crc8(data, 2) != data[2] || crc8(data + 3, 2) != data[5]) {
-    return "CRC error";
-  }
-  const uint16_t rawT = (uint16_t(data[0]) << 8) | data[1];
-  const uint16_t rawH = (uint16_t(data[3]) << 8) | data[4];
-  temperature = -45.0f + 175.0f * rawT / 65535.0f;
-  humidity = 100.0f * rawH / 65535.0f;
   return nullptr;
 }
 
@@ -129,9 +117,8 @@ void loop() {
   if (error) {
     // Short messages fit the 72-pixel width; full diagnostics go to Serial.
     const char *message = "SHT missing";
-    if (strcmp(error, "Command failed") == 0) message = "I2C command";
+    if (strcmp(error, "Init failed") == 0) message = "SHT init";
     else if (strcmp(error, "Read failed") == 0) message = "I2C read";
-    else if (strcmp(error, "CRC error") == 0) message = "CRC error";
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(0, 10, message);
     oled.drawStr(0, 24, "SDA5 SCL6");
