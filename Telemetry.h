@@ -43,6 +43,27 @@ inline bool validToken(const std::string &s) {
   for (unsigned char c : s) if (c <= 0x20 || c >= 0x7f) return false;
   return true;
 }
+inline bool validThingsBoardBase(const std::string &url) {
+  if (url.empty()) return true;
+  if (!validUrl(url) || url.find('?') != std::string::npos) return false;
+  auto start = url.find("://") + 3;
+  auto slash = url.find('/', start);
+  return slash == std::string::npos || slash == url.size() - 1;
+}
+inline std::string pathSegment(const std::string &s) {
+  std::string out;
+  for (unsigned char c : s) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out += char(c);
+    else { char encoded[4]; snprintf(encoded, sizeof encoded, "%%%02X", c); out += encoded; }
+  }
+  return out;
+}
+inline std::string reportUrl(bool thingsboard, std::string url, const std::string &token) {
+  if (!thingsboard || url.empty()) return url;
+  if (url.back() == '/') url.pop_back();
+  return url + "/api/v1/" + pathSegment(token) + "/telemetry";
+}
 inline bool interval(const std::string &s, uint32_t &result) {
   if (s.empty() || s.size() > 5) return false;
   uint32_t n = 0;
@@ -68,5 +89,11 @@ inline std::string payload(const char *id, const char *room, float temperature,
   std::string out = "{\"device_id\":" + quote(id) + ",\"room\":" + quote(room) + values;
   if (sampledAt && *sampledAt) out += ",\"sampled_at\":" + quote(sampledAt);
   return out + '}';
+}
+inline std::string thingsBoardPayload(const char *id, const char *room, float temperature,
+                                      float humidity, int64_t sampledMs) {
+  auto values = payload(id, room, temperature, humidity, "");
+  if (values.empty() || sampledMs < 1700000000000LL) return values;
+  return "{\"ts\":" + std::to_string(sampledMs) + ",\"values\":" + values + "}";
 }
 }

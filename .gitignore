@@ -2,3 +2,7 @@ build/
 *.bin
 *.elf
 *.map
+.env
+.env.*
+!.env.example
+__pycache__/

@@ -23,5 +23,15 @@ int main() {
   assert(body.find("\\\"\\u000a\\\\") != std::string::npos);
   assert(payload("id", "room", NAN, 50, "").empty());
   assert(payload("id", "room", 20, 50, "").find("sampled_at")==std::string::npos);
+  assert(validThingsBoardBase("https://tb.example:8443/"));
+  assert(!validThingsBoardBase("https://tb.example/api/v1/token/telemetry"));
+  assert(!validThingsBoardBase("https://tb.example?token=x"));
+  assert(reportUrl(true, "https://tb.example/", "a/b?c#d") ==
+         "https://tb.example/api/v1/a%2Fb%3Fc%23d/telemetry");
+  assert(reportUrl(false, "http://api.example/readings", "bearer") == "http://api.example/readings");
+  assert(thingsBoardPayload("id", "room", 20, 50, 1700000000123LL) ==
+         "{\"ts\":1700000000123,\"values\":{\"device_id\":\"id\",\"room\":\"room\",\"temperature\":20.00,\"humidity\":50.00}}");
+  assert(thingsBoardPayload("id", "room", 20, 50, 0) == payload("id", "room", 20, 50, ""));
+  assert(thingsBoardPayload("id", "room", NAN, 50, 1700000000123LL).empty());
   std::cout << body << std::endl;
 }

@@ -1,5 +1,7 @@
 #include "NetworkService.h"
 #include "Telemetry.h"
+#include "BuildDefaults.h"
+#include "Configuration.h"
 #include "PortalPage.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -10,20 +12,12 @@
 #include <esp_mac.h>
 #include <esp_random.h>
 #include <time.h>
+#include <sys/time.h>
 
 namespace {
-constexpr uint32_t CONFIG_MAGIC = 0x43335401; // Schema version 1.
+using namespace configuration;
 constexpr uint32_t PORTAL_TIMEOUT_MS = 10 * 60 * 1000;
-struct Config {
-  uint32_t magic = CONFIG_MAGIC;
-  uint32_t seconds = 60;
-  char ssid[33] = {};
-  char password[64] = {};
-  char room[64] = {};
-  char url[257] = {};
-  char token[257] = {};
-};
-struct Sample { float temperature; float humidity; bool valid; uint32_t ms; time_t utc; };
+struct Sample { float temperature; float humidity; bool valid; uint32_t ms; int64_t utcMs; };
 Config config; // Used only by the portal task after initialization.
 char deviceId[20];
 char apName[16];
@@ -47,20 +41,14 @@ void state(const char *text, int code = 0) {
   view.httpStatus = code;
   portEXIT_CRITICAL(&viewMutex);
 }
-bool configValid(const Config &c) {
-  if (c.magic != CONFIG_MAGIC || c.seconds < 10 || c.seconds > 86400) return false;
-  if (!memchr(c.ssid, 0, sizeof c.ssid) || !memchr(c.password, 0, sizeof c.password) ||
-      !memchr(c.room, 0, sizeof c.room) || !memchr(c.url, 0, sizeof c.url) ||
-      !memchr(c.token, 0, sizeof c.token)) return false;
-  return telemetry::validUrl(c.url) && telemetry::validToken(c.token) &&
-         (!*c.password || strlen(c.password) >= 8);
-}
 bool loadConfig() {
   Preferences prefs;
   if (!prefs.begin("room-sensor", true)) return false;
   Config saved;
-  bool ok = prefs.getBytesLength("config") == sizeof saved &&
-            prefs.getBytes("config", &saved, sizeof saved) == sizeof saved && configValid(saved);
+  size_t length = prefs.getBytesLength("config");
+  uint8_t bytes[sizeof(Config)];
+  bool ok = length <= sizeof bytes && prefs.getBytes("config", bytes, length) == length &&
+            decode(bytes, length, saved);
   prefs.end();
   if (ok) config = saved;
   return ok;
@@ -94,6 +82,7 @@ void getConfig() {
   // Passwords and tokens are never returned to the browser.
   std::string body = "{\"device_id\":" + quote(deviceId) + ",\"csrf\":" + quote(csrf) +
       ",\"ssid\":" + quote(config.ssid) + ",\"room\":" + quote(config.room) +
+      ",\"mode\":" + quote(config.thingsboard ? "thingsboard" : "http") +
       ",\"url\":" + quote(config.url) + ",\"seconds\":" + std::to_string(config.seconds) +
       ",\"password_set\":" + (*config.password ? "true" : "false") +
       ",\"token_set\":" + (*config.token ? "true" : "false") +
@@ -115,6 +104,13 @@ void updateConfig() {
   if (!telemetry::interval(server.arg("seconds").c_str(), seconds)) { errorResponse("上报间隔需为 10–86400 的整数秒"); return; }
   if (token.length() >= sizeof config.token || !telemetry::validToken(token.c_str())) { errorResponse("Token 最长 256 字节，不能包含空白或非 ASCII 字符"); return; }
   Config next = config;
+  String mode = server.arg("mode");
+  if (mode != "http" && mode != "thingsboard") { errorResponse("请选择上报模式"); return; }
+  next.thingsboard = mode == "thingsboard";
+  if (next.thingsboard != config.thingsboard) next.token[0] = 0;
+  if (next.thingsboard && !telemetry::validThingsBoardBase(url.c_str())) {
+    errorResponse("ThingsBoard 地址只填写 http(s)://主机:端口，不包含接口路径或查询参数"); return;
+  }
   bool openWifi = server.hasArg("open_wifi");
   if (openWifi) next.password[0] = 0;
   else if (password.length()) {
@@ -129,6 +125,9 @@ void updateConfig() {
   strlcpy(next.room, room.c_str(), sizeof next.room);
   strlcpy(next.url, url.c_str(), sizeof next.url);
   next.seconds = seconds;
+  if (next.thingsboard && *next.url && !*next.token) {
+    errorResponse("ThingsBoard 需要 Device Access Token；切换模式后请重新填写"); return;
+  }
   if (!saveConfig(next)) { state("NVS_ERROR"); json(500, "{\"error\":\"保存失败，原配置未应用，请重试\"}"); return; }
   config = next;
   portalStartedMs = millis();
@@ -203,26 +202,30 @@ void portalTask(void *) {
 }
 int postSample(const Config &active, const Sample &sample) {
   char timestamp[24] = {};
-  if (sample.utc >= 1700000000) {
+  if (sample.utcMs >= 1700000000000LL) {
+    time_t seconds = sample.utcMs / 1000;
     struct tm utc;
-    gmtime_r(&sample.utc, &utc);
+    gmtime_r(&seconds, &utc);
     strftime(timestamp, sizeof timestamp, "%Y-%m-%dT%H:%M:%SZ", &utc);
   }
-  std::string body = telemetry::payload(deviceId, active.room, sample.temperature, sample.humidity, timestamp);
+  std::string body = active.thingsboard
+      ? telemetry::thingsBoardPayload(deviceId, active.room, sample.temperature, sample.humidity, sample.utcMs)
+      : telemetry::payload(deviceId, active.room, sample.temperature, sample.humidity, timestamp);
+  std::string url = telemetry::reportUrl(active.thingsboard, active.url, active.token);
   if (body.empty()) return -1;
   esp_http_client_config_t options = {};
-  options.url = active.url;
+  options.url = url.c_str();
   options.method = HTTP_METHOD_POST;
   options.timeout_ms = 5000;
   options.disable_auto_redirect = true;
   options.crt_bundle_attach = esp_crt_bundle_attach;
   options.buffer_size = 512;
-  options.buffer_size_tx = 1024;
+  options.buffer_size_tx = 2048; // Encoded ThingsBoard token plus URL and headers.
   auto client = esp_http_client_init(&options);
   if (!client) return -1;
   esp_http_client_set_header(client, "Content-Type", "application/json");
   std::string authorization;
-  if (*active.token) {
+  if (!active.thingsboard && *active.token) {
     authorization = std::string("Bearer ") + active.token;
     esp_http_client_set_header(client, "Authorization", authorization.c_str());
   }
@@ -301,7 +304,19 @@ bool networkBegin() {
   uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_STA);
   snprintf(deviceId, sizeof deviceId, "c3-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   snprintf(apName, sizeof apName, "C3-%02X%02X%02X", mac[3], mac[4], mac[5]);
-  loadConfig();
+  // A saved phone configuration is authoritative as a whole (including blanks).
+  // Embedded defaults are not persisted, so a rebuild can update them on an unconfigured device.
+  if (!loadConfig()) {
+    strlcpy(config.ssid, C3_WIFI_SSID, sizeof config.ssid);
+    strlcpy(config.password, C3_WIFI_PASSWORD, sizeof config.password);
+    strlcpy(config.room, C3_ROOM_NAME, sizeof config.room);
+    strlcpy(config.url, C3_REPORT_URL, sizeof config.url);
+    strlcpy(config.token, C3_REPORT_TOKEN, sizeof config.token);
+    config.seconds = C3_REPORT_SECONDS;
+    config.thingsboard = C3_THINGSBOARD;
+    if (!configValid(config)) { config = Config{}; Serial.println("Invalid build defaults; using phone setup"); }
+    else Serial.println("Configuration source: firmware defaults");
+  } else Serial.println("Configuration source: saved phone settings");
   if (!*config.room) strlcpy(config.room, deviceId, sizeof config.room);
   WiFi.persistent(false);
   WiFi.setHostname(deviceId);
@@ -320,6 +335,8 @@ bool networkBegin() {
 void networkRequestPortal() { if (portalTaskHandle) xTaskNotifyGive(portalTaskHandle); }
 void networkPublishSample(float temperature, float humidity, bool valid) {
   if (!samples) return;
-  Sample sample = {temperature, humidity, valid, millis(), time(nullptr)};
+  struct timeval now;
+  gettimeofday(&now, nullptr);
+  Sample sample = {temperature, humidity, valid, millis(), int64_t(now.tv_sec) * 1000 + now.tv_usec / 1000};
   xQueueOverwrite(samples, &sample);
 }

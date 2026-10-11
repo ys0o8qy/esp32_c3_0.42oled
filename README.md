@@ -10,19 +10,57 @@
 - BOOT 配置按钮：GPIO9，低电平按下；运行时长按 3 秒进入配置。不要在开机或复位时按住，否则会进入芯片下载模式。
 - ESP32 Arduino Core 3.3.10、U8g2 2.36.19、Sensirion I2C SHT3x 1.0.1、Sensirion Core 0.7.3。联网、网页、NVS、HTTP 和证书库均来自 ESP32 Core。
 
+## 编译时配置：`.env`
+
+优先级是 **手机保存的整份配置 > 固件内置 `.env` 配置 > 程序空默认值**，不是逐字段混合。旧版手机配置会兼容读取，保持为通用 HTTP 模式。已有手机配置时，即使修改 `.env` 并重新烧录，也不会覆盖它；要切换到 ThingsBoard，请长按 BOOT 后在手机上修改模式和参数。手机配置中的空接口也会保留，不会被编译配置重新开启。
+
+没有有效手机配置时才使用固件默认值，且不会自动把默认值写入 NVS，因此这类设备可通过重新编译更新默认值。手机点击保存后，整份配置存入 NVS，之后以手机配置为准。
+
+```sh
+cp .env.example .env
+# 用编辑器填写 .env，再执行：
+python3 scripts/build.py
+# 编译并上传本次固件：
+python3 scripts/build.py --upload --port /dev/cu.usbmodem101
+# 为不同房间选择不同的配置文件（默认读取项目目录的 .env）：
+python3 scripts/build.py --env .env.bedroom --upload --port /dev/cu.usbmodem101
+```
+
+ThingsBoard 示例（示例凭据不能直接使用）：
+
+```dotenv
+WIFI_SSID="家中 Wi-Fi"
+WIFI_PASSWORD="替换为真实密码"
+ROOM_NAME="卧室"
+REPORT_INTERVAL_SECONDS=60
+REPORT_MODE=thingsboard
+THINGSBOARD_URL="https://thingsboard.example.com"
+THINGSBOARD_ACCESS_TOKEN="替换为这块设备的AccessToken"
+REPORT_URL=""
+REPORT_TOKEN=""
+```
+
+通用接口模式设置 `REPORT_MODE=http`，填写 `REPORT_URL` 和可选的 `REPORT_TOKEN`，清空两个 `THINGSBOARD_*` 字段。任一模式的地址留空均暂停上报。ThingsBoard 地址不为空时必须填写设备 Token。每个房间分别建立 ThingsBoard 设备并使用不同 Token；设备 ID 仍从芯片 MAC 自动生成。
+
+`.env` 使用 UTF-8，每行 `KEY=value`，可用一对单/双引号包围值；以 `#` 开头的整行是注释。值按原样读取，**不支持行尾注释、变量替换、反斜杠转义、`export` 或多行值**，不会执行 shell 命令。空 Wi-Fi 密码表示开放网络。脚本验证字段名、重复字段、字节长度、间隔和 URL，失败时停止构建且不输出配置值。指定 `--env` 的文件必须存在；默认 `.env` 不存在时仍可编译空配置固件。
+
+构建需要 Python 3 和已配置的 `arduino-cli`。脚本每次创建独立临时工程生成配置，退出后删除临时工程；固件输出在 `build/firmware/`。`.env`、`.env.*`（除 `.env.example`）和 `build/` 已忽略，真实密码、Token 和含凭据固件不应提交或公开。固件内的配置并非加密存储，可从固件中提取。
+
+**Arduino IDE 或直接运行 `arduino-cli compile` 不读取 `.env`**，使用仓库的空 `BuildDefaults.h` 和手机配置。使用 `.env` 时请通过上述脚本构建，不需要手动修改头文件。
+
 ## 首次使用：手机配置
 
 1. 上传固件后上电。没有 Wi-Fi 配置时，自动创建 `C3-XXXXXX` 热点。
 2. OLED 显示热点名和 `P:` 后的随机 8 位密码；每次重新开启配置热点会更换密码。配置说明显示 6 秒、温湿度显示 2 秒，循环切换。
 3. 手机连接该热点。如果提示“无互联网”，选择保持连接；浏览器打开 **http://192.168.4.1/**。部分手机会自动弹出配置页。
-4. 填写房间名称、家中 **2.4GHz Wi-Fi** 名称和密码。接口地址和 Bearer Token 可以先留空；间隔默认 60 秒，可设 10–86400 秒。
+4. 填写房间名称、家中 **2.4GHz Wi-Fi** 名称和密码。选择通用 HTTP 或 ThingsBoard 模式，填写对应地址和 Token；地址可以先留空暂停上报。间隔默认 60 秒，可设 10–86400 秒。
 5. 点击“保存并应用”，观察页面上方的 Wi-Fi 和上报状态。确认后点击“结束配置，关闭热点”，手机即可连接回原 Wi-Fi。
 
 配置断电保存，无需每次重新填写。修改配置时，在设备运行期间长按 BOOT 3 秒，重新连接屏幕显示的热点。保存过 Wi-Fi 配置后，配置热点会在 10 分钟后关闭；普通断网不会自动开放配置热点，设备会持续重连。
 
 同一 Wi-Fi 下密码留空表示保留；换 Wi-Fi 请填写新密码。无密码网络须勾选对应选项。Token 留空表示保留，需要删除时勾选“清除已保存的 Token”。页面不回显已保存的密码和 Token；修改配置只开放在设备热点接口上。
 
-## 接口约定
+## 通用 HTTP 接口约定
 
 - 方法：`POST`，`Content-Type: application/json`。
 - 配置 Token 后附加 `Authorization: Bearer <token>`。
@@ -53,7 +91,7 @@ Grafana 主要负责查询、图表和告警，温湿度历史通常保存在它
 
 | 方案 | 接入现有固件 | 适用情况 |
 | --- | --- | --- |
-| **ThingsBoard Community Edition（CE）** | 可按官方 HTTP 协议直接配置设备遥测地址，保留当前 JSON | 希望同时获得设备管理、历史曲线、仪表盘和告警，少写服务端代码 |
+| **ThingsBoard Community Edition（CE）** | 选择 ThingsBoard 模式，填写服务器地址和设备 Token | 希望同时获得设备管理、历史曲线、仪表盘和告警，少写服务端代码 |
 | **现有接口 + PostgreSQL + Grafana** | 现有接口接收 JSON 并写入 PostgreSQL；Grafana 读取数据库 | 已有接口服务，想保留自己的数据结构并长期查询多个房间 |
 | **Telegraf + InfluxDB + Grafana** | Telegraf HTTP Listener V2 接收 JSON，解析后写入 InfluxDB | 已有时序数据库体系，接受配置多个组件 |
 | **Home Assistant + MQTT** | 需要 HTTP→MQTT 桥接，或未来给固件增加 MQTT | 已使用 Home Assistant，希望联动空调、加湿器等设备 |
@@ -64,11 +102,25 @@ Grafana 主要负责查询、图表和告警，温湿度历史通常保存在它
 
 1. 在服务端为每块板子分别创建设备，取得各自的 **Device Access Token**。不同房间不要共用一个设备 Token，否则数据会汇入同一设备。
 2. 手机连接开发板配置热点，填写房间名、Wi-Fi 和上报间隔。
-3. 接口地址填写 `https://你的域名/api/v1/设备AccessToken/telemetry`；内网 HTTP 可使用 `http://服务器IP:8080/api/v1/设备AccessToken/telemetry`，端口以实际部署为准。
-4. **Bearer Token 留空**；如之前保存过 Token，请勾选“清除已保存的 Token”。ThingsBoard 这里把设备凭据放在 URL 路径中，不是 Bearer 字段。不要将完整地址提交到 Git 或公开截图。
-5. 保存后确认 OLED 的 `UP` 计数增长，再在 ThingsBoard 设备的最新遥测中查看 `temperature`、`humidity`；随后添加历史曲线，分别选取各设备。
+3. 上报模式选择 **ThingsBoard**；服务器地址填写 `https://你的域名` 或内网 `http://服务器IP:8080`，端口以实际部署为准。不要填写 `/api/v1/.../telemetry` 路径。
+4. 在 **Device Access Token** 填入这块设备的 Token。切换模式后必须重新填写；相同模式下留空表示保留。固件自动生成 `/api/v1/<编码后的设备Token>/telemetry` 路径，不发送 Bearer 认证头。Token 不会回显到配置页。
+5. 保存后确认 OLED 的 `UP` 计数增长，在 ThingsBoard 设备的最新遥测中查看 `temperature`、`humidity`、`room`、`device_id`，随后添加历史曲线并选择各设备。HTTP 401 通常需检查设备 Token，404 检查服务器地址和 HTTP 传输端口。
 
-当前平铺 JSON 符合 ThingsBoard 遥测格式，服务端采用接收时间作为时间轴；`device_id`、`room`、`sampled_at` 会作为普通遥测字段。`sampled_at` **不会自动成为 ThingsBoard 的采样时间**。若以后要求严格按采样时间入库，需要把格式改为 `{"ts": Unix毫秒时间戳, "values": {...}}`，或由接口进行转换；当前固件保持通用接口格式。
+ThingsBoard 模式使用毫秒 Unix 时间戳写入采样时间，联网校时后发送：
+
+```json
+{
+  "ts": 1791619200123,
+  "values": {
+    "device_id": "c3-a1b2c3d4e5f6",
+    "room": "卧室",
+    "temperature": 26.30,
+    "humidity": 48.20
+  }
+}
+```
+
+未校时的 HTTP 请求发送平铺 `values` 内容，让 ThingsBoard 使用接收时间；HTTPS 仍等待校时后验证证书。`ts` 来自实际采样时刻，不是发送时刻。重试沿用现有退避策略，断网不补传历史。选择通用 HTTP 模式时仍使用前面的 `sampled_at` 格式。没有部署 ThingsBoard，也没有在真实 ThingsBoard 服务上联调。
 
 ### 其他方案的接入边界
 
@@ -93,7 +145,7 @@ Grafana 主要负责查询、图表和告警，温湿度历史通常保存在它
 
 ## 构建与上传
 
-在本目录运行：
+以下为不读取 `.env` 的原生构建方式；需要打包配置时使用前面的 `scripts/build.py`。在本目录运行：
 
 ```sh
 arduino-cli lib install "U8g2@2.36.19" "Sensirion I2C SHT3x@1.0.1" "Sensirion Core@0.7.3"
@@ -135,3 +187,16 @@ c++ -std=c++17 tests/telemetry_test.cpp -o /tmp/c3-telemetry-test
 - 手动调整开发板并释放被串口监视器占用的端口后，已通过 `/dev/cu.usbmodem101` 完成上传；固件及分区内容校验通过。此前自动连接曾提示 `No serial data received`。
 - 用户已确认：上传后单独按 RST，屏幕正常显示温湿度。本次串口复查被其他监视器占用，未取得新的连续采样日志；真实 Wi-Fi 和接口接收仍需配置后验证。
 - 上述存储方案已对照官方协议整理；没有部署服务端，实际接收和历史曲线尚未联调。
+
+### `.env` 与 ThingsBoard 更新验证
+
+- 新增 `.env` 构建脚本、手机上报模式切换、旧版 NVS 配置兼容和 ThingsBoard 毫秒采样时间格式。
+- 空配置与 `.env.example` 构建路径均通过；最终固件程序 1,292,887 字节（98%），静态内存 40,516 字节。手机页面 JavaScript 语法检查通过。
+- 主机测试覆盖 `.env` 默认/显式文件、字面值和 UTF-8、非法参数、生成配置不残留、旧配置兼容、空值优先、URL Token 编码、校时/未校时遥测格式。
+- 新固件已上传当前开发板，Flash 哈希校验通过；启动日志显示使用固件默认配置，配置热点正常开启，识别 OLED 0x3C、SHT3x 0x44，连续采样约 27.8°C / 43.7%RH。
+- 此次上传使用空默认配置，未内置真实凭据。真实 `.env` 凭据联网、手机页面实机操作、NVS 重启恢复与 ThingsBoard 接收需在配置后验证。
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+c++ -std=c++17 tests/configuration_test.cpp -o /tmp/c3-config-test && /tmp/c3-config-test
+```
