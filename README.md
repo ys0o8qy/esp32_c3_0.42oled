@@ -47,6 +47,37 @@
 
 正在进行的旧请求可能在保存新配置后才结束；随后应用新配置。串口会输出 HTTP 状态码（`-1` 表示连接/TLS/超时等传输失败），不输出请求 Token。由于网络可能在服务器接收后中断，应由服务端按需要去重。
 
+## 上报数据存储方案
+
+Grafana 主要负责查询、图表和告警，温湿度历史通常保存在它连接的数据库里；不能把本项目上报地址直接填写为 Grafana 页面地址。以下为开源自部署方案，尚未在本项目中实际部署或联调。
+
+| 方案 | 接入现有固件 | 适用情况 |
+| --- | --- | --- |
+| **ThingsBoard Community Edition（CE）** | 可按官方 HTTP 协议直接配置设备遥测地址，保留当前 JSON | 希望同时获得设备管理、历史曲线、仪表盘和告警，少写服务端代码 |
+| **现有接口 + PostgreSQL + Grafana** | 现有接口接收 JSON 并写入 PostgreSQL；Grafana 读取数据库 | 已有接口服务，想保留自己的数据结构并长期查询多个房间 |
+| **Telegraf + InfluxDB + Grafana** | Telegraf HTTP Listener V2 接收 JSON，解析后写入 InfluxDB | 已有时序数据库体系，接受配置多个组件 |
+| **Home Assistant + MQTT** | 需要 HTTP→MQTT 桥接，或未来给固件增加 MQTT | 已使用 Home Assistant，希望联动空调、加湿器等设备 |
+
+本项目优先考虑：**希望配置后就能看图，选择 ThingsBoard CE；已有自己的接口，选择 PostgreSQL + Grafana。** ThingsBoard 功能完整，但并非极轻量服务：官方 Docker 文档给开发/验证环境列出的内存要求为 4GB。只有少量房间也不必强制使用专用时序数据库：10 个房间每分钟一条，约 14,400 条/天、526 万条/年，可从普通 PostgreSQL 表和时间索引开始。
+
+### ThingsBoard CE：手机配置示例
+
+1. 在服务端为每块板子分别创建设备，取得各自的 **Device Access Token**。不同房间不要共用一个设备 Token，否则数据会汇入同一设备。
+2. 手机连接开发板配置热点，填写房间名、Wi-Fi 和上报间隔。
+3. 接口地址填写 `https://你的域名/api/v1/设备AccessToken/telemetry`；内网 HTTP 可使用 `http://服务器IP:8080/api/v1/设备AccessToken/telemetry`，端口以实际部署为准。
+4. **Bearer Token 留空**；如之前保存过 Token，请勾选“清除已保存的 Token”。ThingsBoard 这里把设备凭据放在 URL 路径中，不是 Bearer 字段。不要将完整地址提交到 Git 或公开截图。
+5. 保存后确认 OLED 的 `UP` 计数增长，再在 ThingsBoard 设备的最新遥测中查看 `temperature`、`humidity`；随后添加历史曲线，分别选取各设备。
+
+当前平铺 JSON 符合 ThingsBoard 遥测格式，服务端采用接收时间作为时间轴；`device_id`、`room`、`sampled_at` 会作为普通遥测字段。`sampled_at` **不会自动成为 ThingsBoard 的采样时间**。若以后要求严格按采样时间入库，需要把格式改为 `{"ts": Unix毫秒时间戳, "values": {...}}`，或由接口进行转换；当前固件保持通用接口格式。
+
+### 其他方案的接入边界
+
+- **PostgreSQL + Grafana**：建议接口保存 `device_id`、`room`、`temperature`、`humidity`、可空的 `sampled_at` 和始终存在的 `received_at`；以稳定的 `device_id` 区分设备，房间名作为当时的房间标签。Grafana 内置 PostgreSQL 数据源，可用只读数据库账号查询。Node-RED 可充当 HTTP 接收和转换层，但它本身不等于历史数据库。
+- **InfluxDB**：写入接口使用 line protocol，不能直接接收当前 JSON。Telegraf 的 HTTP Listener V2 + `json_v2` 解析器可完成转换，鉴权需要接收层相应配置，不能假定接受当前 Bearer 字段。版本也须明确：目前 InfluxDB 3 Core 文档说明默认配置下查询时间跨度约 72 小时（包括历史区间），不是仅保留 3 天数据；需要月/年趋势时，应先验证查询限制及聚合策略，不能直接套用旧版教程。
+- **Home Assistant**：MQTT broker 负责消息传输，不自动形成历史数据库。MQTT 温湿度实体需设置正确单位和 `state_class: measurement` 才能参与长期统计；默认原始历史/短期统计保留 10 天，长期统计按小时聚合，不能把它当作无限期保留分钟明细的方案。
+
+官方资料：[Grafana 数据源](https://grafana.com/docs/grafana/latest/datasources/)、[PostgreSQL 数据源](https://grafana.com/docs/grafana/latest/datasources/postgres/)、[ThingsBoard HTTP 遥测](https://thingsboard.io/docs/reference/http-api/telemetry/)、[ThingsBoard Docker 要求](https://thingsboard.io/docs/installation/docker/)、[Telegraf HTTP Listener V2](https://docs.influxdata.com/telegraf/v1/input-plugins/http_listener_v2/)、[JSON v2 解析](https://docs.influxdata.com/telegraf/v1/data_formats/input/json_v2/)、[InfluxDB 3 Core 查询限制](https://docs.influxdata.com/influxdb3/core/get-started/query/)、[Home Assistant MQTT Sensor](https://www.home-assistant.io/integrations/sensor.mqtt/)、[长期统计](https://www.home-assistant.io/docs/configuration/long-term-statistics/)。
+
 ## OLED 状态
 
 正常时两行显示 `T` 温度、`H` 湿度，保留一位小数。底部交替显示：
@@ -74,6 +105,8 @@ arduino-cli monitor --port '<PORT>' --config baudrate=115200
 
 Arduino IDE：ESP32C3 Dev Module、4MB Flash、默认分区、USB CDC On Boot Enabled、Flash Mode DIO。USB-UART 桥接版则改为 CDC Disabled。将 `<PORT>` 替换为实际串口；上传前关闭占用端口的串口监视器。后续普通上传保留 NVS 配置，Erase All Flash 会清除配置。
 
+上传如果一直停在 `Connecting...` 并提示 `No serial data received`，先关闭串口监视器，然后按住 BOOT、按一下并松开 RST、再松开 BOOT，重新查看串口并上传。手动进入下载模式后，若上传完成没有自动启动，按一下 RST。此操作不会清除已有配置。
+
 ## 实现与验证
 
 `c3_temperature.ino` 负责按键、SHT3x 及 OLED；`NetworkService.cpp` 分别用独立 FreeRTOS 任务处理手机网页和网络连接/上报，网络等待不会阻塞主循环采样；队列只保存最新样本。`PortalPage.h` 是离线可用、无外部资源的手机页面，`Telemetry.h` 是可在电脑上验证的格式及调度逻辑。配置以版本化 NVS blob 保存，错误输入不会覆盖现有配置。
@@ -95,3 +128,10 @@ c++ -std=c++17 tests/telemetry_test.cpp -o /tmp/c3-telemetry-test
 - 已烧录到当前 USB 连接的小屏开发板，Flash 哈希校验通过。
 - 启动日志确认配置 AP 创建成功；I2C 检测到 OLED 0x3C 和 SHT3x 0x44；联网任务运行期间连续温湿度采样正常（约 27.4°C、54%RH）。
 - 主机自动检查和 390px 手机页面模拟交互通过。真实手机连接、Wi-Fi 配置保存/重启恢复及生产接口上报需用户配置后继续验收。
+
+### 重新构建记录（2026-10-11）
+
+- 当前源码编译通过：程序 1,288,625 字节（默认应用分区约 98%），静态内存 40,516 字节。
+- 手动调整开发板并释放被串口监视器占用的端口后，已通过 `/dev/cu.usbmodem101` 完成上传；固件及分区内容校验通过。此前自动连接曾提示 `No serial data received`。
+- 本次上传后暂未收到串口采样日志，运行及屏幕状态仍待复位后确认；上传校验成功不等于真实接口上报已验证。
+- 上述存储方案已对照官方协议整理；没有部署服务端，实际接收和历史曲线尚未联调。
