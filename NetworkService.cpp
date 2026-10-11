@@ -259,10 +259,14 @@ void reporterTask(void *) {
     else if (!connected) {
       state("WAIT_WIFI");
       if (telemetry::due(millis(), lastConnect, 30000)) {
-        lastConnect = millis(); WiFi.begin(active.ssid, active.password);
+        lastConnect = millis();
+        Serial.println("Wi-Fi connecting...");
+        auto status = WiFi.begin(active.ssid, active.password);
+        Serial.printf("Wi-Fi begin status=%d\n", static_cast<int>(status));
       }
     } else {
       if (!wasConnected) {
+        Serial.printf("Wi-Fi connected; IP: %s\n", WiFi.localIP().toString().c_str());
         configTime(0, 0, "pool.ntp.org", "time.cloudflare.com", "ntp.aliyun.com");
         waitMs = 0; failures = 0;
       }
@@ -318,6 +322,9 @@ bool networkBegin() {
     else Serial.println("Configuration source: firmware defaults");
   } else Serial.println("Configuration source: saved phone settings");
   if (!*config.room) strlcpy(config.room, deviceId, sizeof config.room);
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+    Serial.printf("Wi-Fi disconnected; reason=%u\n", info.wifi_sta_disconnected.reason);
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.persistent(false);
   WiFi.setHostname(deviceId);
   WiFi.mode(WIFI_STA);

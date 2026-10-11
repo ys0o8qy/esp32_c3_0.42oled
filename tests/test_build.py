@@ -49,4 +49,22 @@ class BuildConfigTests(unittest.TestCase):
         self.assertNotEqual(configured, clean)
         self.assertIn('#define C3_WIFI_PASSWORD ""', clean)
 
+class IncrementalBuildTests(unittest.TestCase):
+    def test_staging_preserves_mtime_and_refreshes_defaults(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'source'; root.mkdir()
+            (root / 'main.ino').write_text('void setup() {}')
+            (root / 'BuildDefaults.h').write_text('must not overwrite generated header')
+            stage = Path(temp) / 'stage'
+            env = dict(build.DEFAULTS, WIFI_SSID='first')
+            build.prepare_sketch(stage, env, root)
+            original = {p.name:p.stat().st_mtime_ns for p in stage.iterdir()}
+            build.prepare_sketch(stage, env, root)
+            self.assertEqual(original, {p.name:p.stat().st_mtime_ns for p in stage.iterdir()})
+            (stage / 'deleted.cpp').write_text('stale')
+            build.prepare_sketch(stage, build.DEFAULTS, root)
+            self.assertFalse((stage / 'deleted.cpp').exists())
+            self.assertEqual((stage / 'BuildDefaults.h').read_text(), build.header(build.DEFAULTS))
+            self.assertEqual((stage / 'main.ino').stat().st_mtime_ns, original['main.ino'])
+
 if __name__ == '__main__': unittest.main()

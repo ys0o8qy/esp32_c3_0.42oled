@@ -136,6 +136,11 @@ void loop() {
 
   oled.clearBuffer();
   const NetworkView net = networkView();
+  static uint32_t lastNetworkLogMs = 0;
+  if (now - lastNetworkLogMs >= 10000) {
+    lastNetworkLogMs = now;
+    Serial.printf("Network: Wi-Fi %s; state=%s\n", net.connected ? "connected" : "offline", net.state);
+  }
   if (net.portalActive && millis() % 8000 < 6000) {
     // Alternate setup instructions with readings; sampling always continues.
     oled.setFont(u8g2_font_6x10_tf);

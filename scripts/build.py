@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Build in a private temporary sketch; never execute .env as shell code."""
+"""Build with a private incremental cache; never execute .env as shell code."""
 import argparse
+from contextlib import ExitStack
+import fcntl
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 FQBN = 'esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashMode=dio,UploadSpeed=115200'
@@ -101,42 +104,83 @@ def header(env):
         f'#define C3_REPORT_SECONDS {int(env["REPORT_INTERVAL_SECONDS"])}\n#define C3_THINGSBOARD {int(tb)}\n'
 
 
+def write_changed(path, content):
+    if path.exists() and path.read_bytes() == content:
+        return
+    path.write_bytes(content)
+
+
+def prepare_sketch(sketch, env, root=ROOT):
+    sketch.mkdir(parents=True, exist_ok=True)
+    sources = {}
+    for pattern in ('*.ino', '*.h', '*.cpp'):
+        for source in root.glob(pattern):
+            if source.name != 'BuildDefaults.h':
+                sources[source.name] = source.read_bytes()
+    sources['BuildDefaults.h'] = header(env).encode('utf-8')
+    # Preserve unchanged mtimes so CLI can reuse object files; remove deleted sources.
+    for stale in sketch.iterdir():
+        if stale.is_file() and stale.name not in sources:
+            stale.unlink()
+    for name, content in sources.items():
+        write_changed(sketch / name, content)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--env', type=Path, help='默认使用项目 .env；指定路径不存在则报错')
     parser.add_argument('--upload', action='store_true', help='成功编译后上传本次固件')
     parser.add_argument('--port', help='上传串口，例如 /dev/cu.usbmodem101')
+    parser.add_argument('--clean', action='store_true', help='清理编译缓存后完整重编译')
+    parser.add_argument('--no-cache', action='store_true', help='使用一次性临时目录，不保留本次编译缓存')
+    parser.add_argument('--jobs', type=int, default=0, help='并行编译数，0 自动使用 CPU 核心数')
     args = parser.parse_args()
     if args.upload and not args.port:
         parser.error('--upload 需要 --port')
     if args.port and not args.upload:
         parser.error('--port 需要 --upload')
+    if args.jobs < 0:
+        parser.error('--jobs 不能小于 0')
     os.umask(0o077)
     try:
         env = validate(read_env(args.env or ROOT / '.env', required=args.env is not None))
         if not shutil.which('arduino-cli'):
             raise ValueError('未找到 arduino-cli，请先安装并配置 ESP32 Core 和依赖库')
-        with tempfile.TemporaryDirectory(prefix='c3-build-') as temp:
-            base = Path(temp)
+        with ExitStack() as stack:
+            work = ROOT / 'build'
+            work.mkdir(parents=True, exist_ok=True)
+            lock = stack.enter_context((work / '.build.lock').open('a'))
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError('另一个构建或上传正在运行，请等待结束')
+            if args.no_cache:
+                base = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='c3-build-')))
+            else:
+                base = work / '.cache'
+                base.mkdir(mode=0o700, exist_ok=True)
+                base.chmod(0o700)
             sketch = base / 'c3_temperature'
-            sketch.mkdir()
-            for pattern in ('*.ino', '*.h', '*.cpp'):
-                for source in ROOT.glob(pattern):
-                    shutil.copy2(source, sketch / source.name)
-            (sketch / 'BuildDefaults.h').write_text(header(env))
-            build = base / 'build'
-            # No secret values are passed as CLI flags or printed.
-            subprocess.run(['arduino-cli','compile','--fqbn',FQBN,'--build-path',str(build),str(sketch)], check=True)
-            output = ROOT / 'build' / 'firmware'
+            prepare_sketch(sketch, env)
+            build = base / 'objects'
+            command = ['arduino-cli','compile','--fqbn',FQBN,'--build-path',str(build),
+                       '--jobs',str(args.jobs)]
+            if args.clean:
+                command.append('--clean')
+            start = time.monotonic()
+            subprocess.run(command + [str(sketch)], check=True)
+            print(f'编译耗时：{time.monotonic() - start:.2f} 秒', flush=True)
+            output = work / 'firmware'
             output.mkdir(parents=True, exist_ok=True)
             for artifact in build.glob('*.bin'):
                 shutil.copy2(artifact, output / artifact.name)
             print('编译成功。固件位于 build/firmware（可能包含凭据，请勿公开）。', flush=True)
             if args.upload:
+                start = time.monotonic()
                 subprocess.run(['arduino-cli','upload','--fqbn',FQBN,'--port',args.port,
                                 '--input-dir',str(build),str(sketch)], check=True)
+                print(f'上传耗时：{time.monotonic() - start:.2f} 秒', flush=True)
     except (ValueError, OSError, UnicodeError) as exc:
-        # Parser errors never include config values. Avoid subprocess argument dumps.
         print('构建失败：' + (str(exc) if type(exc) is ValueError else '无法读取配置或执行构建工具'))
         return 1
     except subprocess.CalledProcessError:
