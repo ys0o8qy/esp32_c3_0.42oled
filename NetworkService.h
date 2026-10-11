@@ -7,6 +7,7 @@ struct NetworkView {
   uint32_t uploaded;
   int httpStatus;
   char state[24];
+  char ip[16]; // Station IPv4 address; empty while disconnected.
   char apName[16];
   char apPassword[12];
 };

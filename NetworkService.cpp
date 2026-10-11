@@ -251,8 +251,11 @@ void reporterTask(void *) {
       waitMs = 0; failures = 0; lastHttpCode = 0;
     }
     bool connected = WiFi.status() == WL_CONNECTED;
+    char ip[16] = {};
+    if (connected) WiFi.localIP().toString().toCharArray(ip, sizeof ip);
     portENTER_CRITICAL(&viewMutex);
     view.connected = connected;
+    memcpy(view.ip, ip, sizeof view.ip);
     view.configured = *active.url != 0;
     portEXIT_CRITICAL(&viewMutex);
     if (!*active.ssid) state("LOCAL");

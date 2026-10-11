@@ -175,7 +175,8 @@ void loop() {
     // Advance only after a successful measurement, even if values are unchanged.
     snprintf(line, sizeof(line), "LIVE %06lu",
              static_cast<unsigned long>(successfulSamples % 1000000UL));
-    if ((millis() / 3000) % 2) {
+    const uint8_t statusPage = (millis() / 3000) % 3;
+    if (statusPage == 1) {
       if (net.portalActive) snprintf(line, sizeof line, "SETUP AP");
       else if (!net.connected) snprintf(line, sizeof line, "WiFi offline");
       else if (!net.configured) snprintf(line, sizeof line, "API not set");
@@ -184,8 +185,15 @@ void loop() {
       else if (strcmp(net.state, "RETRY") == 0) snprintf(line, sizeof line, "Retry %d", net.httpStatus);
       else snprintf(line, sizeof line, "UP %lu WiFi+", static_cast<unsigned long>(net.uploaded % 10000));
     }
+    if (statusPage == 2) {
+      // 18 characters at 4px: even IP:255.255.255.255 fits the 72px screen.
+      oled.setFont(u8g2_font_4x6_tf);
+      if (net.connected && *net.ip) snprintf(line, sizeof line, "IP:%s", net.ip);
+      else snprintf(line, sizeof line, "IP:offline");
+    }
     oled.drawStr(0, 39, line);
-    if (successfulSamples & 1U) oled.drawBox(67, 34, 3, 3);
+    // Do not cover the final IP digits with the live indicator.
+    if (statusPage != 2 && (successfulSamples & 1U)) oled.drawBox(67, 34, 3, 3);
   }
   oled.sendBuffer();
 }
